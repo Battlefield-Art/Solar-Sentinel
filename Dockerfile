@@ -48,8 +48,9 @@ RUN apk add --no-cache \
     git=2.43.7-r0 \
     netcat-openbsd=1.226-r0 \
     jq=1.7.1-r0 \
+    py3-h5py=3.10.0-r0 \
     # Build toolchain so pip/npm can compile wheels missing musl builds
-    # (e.g. cryptography, h5py, lxml, better-sqlite3)
+    # (e.g. cryptography, lxml, better-sqlite3)
     build-base \
     musl-dev \
     python3-dev \
