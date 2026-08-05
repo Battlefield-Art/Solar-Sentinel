@@ -8,6 +8,7 @@ Hermes AI Agent - Gemini API with Function Calling
 import os
 import sys
 import json
+import time
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -37,8 +38,27 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
 
 # InfluxDB Configuration
 INFLUX_URL = os.getenv("INFLUXDB_URL", "http://localhost:8086")
-INFLUX_TOKEN = os.getenv("INFLUXDB_TOKEN", "my-token")
 INFLUX_ORG = os.getenv("INFLUXDB_ORG", "my-org")
+
+def _influx_token():
+    token = os.getenv("INFLUXDB_TOKEN", "")
+    if not token or token == "my-token":
+        env_file = "/data/influxdb/influx.env"
+        if os.path.exists(env_file):
+            try:
+                with open(env_file) as f:
+                    for line in f:
+                        line = line.strip()
+                        if line.startswith("INFLUXDB_TOKEN="):
+                            return line.split("=", 1)[1]
+            except Exception:
+                pass
+    return token or "my-token"
+
+INFLUX_TOKEN = _influx_token()
+
+WASTE_BUCKET = os.getenv("INFLUXDB_BUCKET_EVA_PATTERNS", "eva_patterns")
+ELECTRICITY_RATE_USD_PER_KWH = float(os.getenv("ELECTRICITY_RATE_USD_PER_KWH", 0.15))
 
 # MQTT Topics
 INBOX_TOPIC = "solar/hermes/inbox"
@@ -215,8 +235,8 @@ class HermesAgent:
         # Tool 12: get_waste_analysis
         def get_waste_analysis() -> dict:
             """Analyzes energy waste patterns from InfluxDB including phantom loads and inefficient usage."""
-            query = '''
-            from(bucket: "eva_patterns")
+            query = f'''
+            from(bucket: "{WASTE_BUCKET}")
               |> range(start: -24h)
               |> filter(fn: (r) => r["_measurement"] == "eva_patterns")
               |> filter(fn: (r) => r["_field"] == "avg_w")
@@ -234,11 +254,12 @@ class HermesAgent:
                         
                         # Consider < 10W as potential phantom load
                         if avg_w < 10.0:
+                            monthly_cost = round(avg_w * 24 * 30 / 1000 * ELECTRICITY_RATE_USD_PER_KWH, 2)
                             phantom_loads.append({
                                 "node_id": node_id,
                                 "avg_watts": round(avg_w, 2),
                                 "daily_kwh": round(avg_w * 24 / 1000, 3),
-                                "monthly_cost_estimate": round(avg_w * 24 * 30 / 1000 * 0.15, 2)
+                                "monthly_cost_estimate": monthly_cost
                             })
                             total_waste_w += avg_w
                 
@@ -246,7 +267,7 @@ class HermesAgent:
                     "phantom_loads": phantom_loads,
                     "total_phantom_watts": round(total_waste_w, 2),
                     "daily_waste_kwh": round(total_waste_w * 24 / 1000, 3),
-                    "monthly_cost_estimate_usd": round(total_waste_w * 24 * 30 / 1000 * 0.15, 2),
+                    "monthly_cost_estimate_usd": round(total_waste_w * 24 * 30 / 1000 * ELECTRICITY_RATE_USD_PER_KWH, 2),
                     "timestamp": datetime.now().isoformat()
                 }
             except Exception as e:
@@ -381,12 +402,6 @@ class HermesAgent:
             ]
         }
         
-        # Initialize Gemini model with tools
-        self.model = genai.GenerativeModel(
-            model_name='gemini-1.5-pro',
-            tools=tools
-        )
-        
         # System instruction
         self.system_instruction = """You are Hermes, the AI agent for Solar-Sentinel-AIO v3.
 You manage the energy system, EVA (Energy Value Analysis), and device control.
@@ -404,6 +419,15 @@ You have access to 12 tools for system management:
 
 Be concise, professional, and proactive. Suggest energy-saving actions when appropriate.
 Always use tools to get real-time data before making recommendations."""
+
+        # Initialize Gemini model with tools and system instruction
+        self.model = genai.GenerativeModel(
+            model_name='gemini-1.5-pro',
+            tools=tools,
+            system_instruction=self.system_instruction
+        )
+        # Persistent chat session for conversation memory (bounded history)
+        self.chat = self.model.start_chat()
 
     def load_json_file(self, filepath):
         if os.path.exists(filepath):
@@ -449,11 +473,14 @@ Always use tools to get real-time data before making recommendations."""
         try:
             payload = msg.payload.decode()
             logger.info(f"Received message: {payload}")
-            
-            # Start chat session with system instruction
-            chat = self.model.start_chat()
-            chat.send_message(self.system_instruction)
-            
+
+            # Reuse the persistent chat session for conversation memory,
+            # resetting once history grows too large
+            chat = self.chat
+            if len(chat.history) > 40:
+                chat = self.model.start_chat()
+                self.chat = chat
+
             # Send user message
             response = chat.send_message(payload)
             
@@ -545,6 +572,5 @@ Always use tools to get real-time data before making recommendations."""
 
 
 if __name__ == "__main__":
-    import time
     agent = HermesAgent()
     agent.run()

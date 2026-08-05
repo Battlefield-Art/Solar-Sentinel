@@ -122,7 +122,7 @@
     - platform: mqtt
       topic: "solar/alerts/guard"
   action:
-    - service: notify.persistent_notification
+    - service: persistent_notification.create
       data:
         title: "Solar Sentinel: {{ value_json.new_tier | upper if value_json.new_tier else 'ALERT' }}"
         message: "{{ value_json.message }}"
@@ -137,7 +137,7 @@
     - condition: template
       value_template: "{{ 'ABUNDANCE' in value_json.message }}"
   action:
-    - service: notify.persistent_notification
+    - service: persistent_notification.create
       data:
         title: "Energy Abundance Detected"
         message: "Solar production is high and battery is full. Good time for laundry or EV charging!"
@@ -152,7 +152,7 @@
     - condition: template
       value_template: "{{ value_json.status == 'CRITICAL' }}"
   action:
-    - service: notify.persistent_notification
+    - service: persistent_notification.create
       data:
         title: "CRITICAL HEALTH ALERT"
         message: "System health is CRITICAL: {{ value_json.metrics }}"
@@ -167,7 +167,7 @@
     - condition: template
       value_template: "{{ 'SUCCESS' in trigger.payload }}"
   action:
-    - service: notify.persistent_notification
+    - service: persistent_notification.create
       data:
         title: "Backup Successful"
         message: "{{ trigger.payload }}"
@@ -182,7 +182,7 @@
     - condition: template
       value_template: "{{ 'NOT DETECTED' in trigger.payload or 'REMINDER' in trigger.payload }}"
   action:
-    - service: notify.persistent_notification
+    - service: persistent_notification.create
       data:
         title: "USB Backup Warning"
         message: "{{ trigger.payload }}"
@@ -193,16 +193,15 @@
 # =============================================================================
 
 - id: eva_map_update
-  alias: "EVA: Map Update Notification"
+  alias: "EVA: Map Update Log"
   trigger:
     - platform: mqtt
       topic: "solar/eva/map"
   action:
-    - service: notify.persistent_notification
+    - service: logbook.log
       data:
-        title: "Energy Map Updated"
+        name: "EVA"
         message: "PV: {{ value_json.system.pv_watts }}W, SOC: {{ value_json.system.soc }}%, Tier: {{ value_json.system.tier }}"
-        notification_id: "eva_map_status"
 
 - id: eva_phantom_alert
   alias: "EVA: Phantom Load Alert"
@@ -213,7 +212,7 @@
     - condition: template
       value_template: "{{ 'Phantom' in value_json.message }}"
   action:
-    - service: notify.persistent_notification
+    - service: persistent_notification.create
       data:
         title: "EVA: Phantom Load Cut"
         message: "{{ value_json.message }}"
@@ -225,7 +224,7 @@
     - platform: mqtt
       topic: "solar/eva/optimal_window"
   action:
-    - service: notify.persistent_notification
+    - service: persistent_notification.create
       data:
         title: "Optimal Energy Window"
         message: "Best time to use power: {{ value_json.start_time }} to {{ value_json.end_time }} ({{ value_json.predicted_yield_wh }}Wh predicted)"
@@ -240,7 +239,7 @@
     - condition: template
       value_template: "{{ 'Pattern' in value_json.message }}"
   action:
-    - service: notify.persistent_notification
+    - service: persistent_notification.create
       data:
         title: "EVA: New Pattern Learned"
         message: "{{ value_json.message }}"
@@ -251,14 +250,14 @@
 # =============================================================================
 
 - id: eva_window_arrived
-  alias: "EVA: Optimal Window Arrived"
+  alias: "EVA: Optimal Window Started"
   description: "Notifies when the optimal energy window starts"
   trigger:
     - platform: mqtt
-      topic: "solar/eva/optimal_window"
+      topic: "solar/eva/window_started"
   condition: []
   action:
-    - service: notify.persistent_notification
+    - service: persistent_notification.create
       data:
         title: "EVA: Optimal Window Started"
         message: "The optimal energy window has arrived. You can now run high-power appliances."
@@ -278,15 +277,9 @@
   condition:
     - condition: template
       value_template: >
-        {% set phantom_count = 0 %}
-        {% for node_id, node in value_json.nodes.items() %}
-          {% if node.priority == 'PHANTOM' and node.last_power > 5 %}
-            {% set phantom_count = phantom_count + 1 %}
-          {% endif %}
-        {% endfor %}
-        {{ phantom_count > 2 }}
+        {{ value_json.nodes.values() | selectattr('priority', 'equalto', 'PHANTOM') | selectattr('last_power', 'gt', 5) | list | length > 2 }}
   action:
-    - service: notify.persistent_notification
+    - service: persistent_notification.create
       data:
         title: "EVA: High Phantom Load Warning"
         message: "Multiple phantom loads detected consuming power. Consider unplugging standby devices."
@@ -299,7 +292,7 @@
     - platform: mqtt
       topic: "solar/eva/device/+/schedule"
   action:
-    - service: notify.persistent_notification
+    - service: persistent_notification.create
       data:
         title: "EVA: Device Scheduled"
         message: "{{ trigger.topic.split('/')[3] }} scheduled for optimal energy window"
@@ -315,7 +308,7 @@
     - condition: template
       value_template: "{{ 'LOCKOUT' in value_json.message }}"
   action:
-    - service: notify.persistent_notification
+    - service: persistent_notification.create
       data:
         title: "EVA: LOCKOUT Warning"
         message: >
@@ -333,7 +326,7 @@
     - condition: template
       value_template: "{{ value_json.recommendations | length > 0 }}"
   action:
-    - service: notify.persistent_notification
+    - service: persistent_notification.create
       data:
         title: "EVA: New Recommendations"
         message: >
@@ -370,3 +363,218 @@
         title: "Hermes Response"
         message: "{{ value_json.response }}"
         notification_id: "hermes_response"
+
+# =============================================================================
+# SECTION 6: DATA PUBLISHERS (WIRE YOUR REAL SENSORS HERE)
+# Energy Guard and EVA consume battery/PV/device power over MQTT. Replace the
+# entity ids below with your real Home Assistant sensors/switches. Without
+# these, Guard runs on defaults and EVA has no node data.
+# =============================================================================
+
+- id: data_pub_battery_soc
+  alias: "Data: Publish Battery SOC"
+  trigger:
+    - platform: state
+      entity_id: sensor.battery_soc
+  action:
+    - service: mqtt.publish
+      data:
+        topic: "solar/battery/soc"
+        payload: "{{ states('sensor.battery_soc') | float }}"
+        qos: "1"
+        retain: true
+
+- id: data_pub_pv_power
+  alias: "Data: Publish PV Power"
+  trigger:
+    - platform: state
+      entity_id: sensor.solar_power
+  action:
+    - service: mqtt.publish
+      data:
+        topic: "solar/pv/power"
+        payload: "{{ states('sensor.solar_power') | float }}"
+        qos: "1"
+        retain: true
+
+- id: data_pub_washing_machine_power
+  alias: "Data: Washing Machine Power"
+  trigger:
+    - platform: state
+      entity_id: sensor.washing_machine_power
+  action:
+    - service: mqtt.publish
+      data:
+        topic: "solar/eva/node/washing_machine/power"
+        payload: "{{ states('sensor.washing_machine_power') | float }}"
+        qos: "1"
+        retain: true
+
+- id: data_pub_washing_machine_state
+  alias: "Data: Washing Machine State"
+  trigger:
+    - platform: state
+      entity_id: switch.washing_machine
+  action:
+    - service: mqtt.publish
+      data:
+        topic: "solar/eva/node/washing_machine/state"
+        payload: "{{ states('switch.washing_machine') | upper }}"
+        qos: "1"
+        retain: true
+
+- id: data_pub_dishwasher_power
+  alias: "Data: Dishwasher Power"
+  trigger:
+    - platform: state
+      entity_id: sensor.dishwasher_power
+  action:
+    - service: mqtt.publish
+      data:
+        topic: "solar/eva/node/dishwasher/power"
+        payload: "{{ states('sensor.dishwasher_power') | float }}"
+        qos: "1"
+        retain: true
+
+- id: data_pub_dishwasher_state
+  alias: "Data: Dishwasher State"
+  trigger:
+    - platform: state
+      entity_id: switch.dishwasher
+  action:
+    - service: mqtt.publish
+      data:
+        topic: "solar/eva/node/dishwasher/state"
+        payload: "{{ states('switch.dishwasher') | upper }}"
+        qos: "1"
+        retain: true
+
+- id: data_pub_water_heater_power
+  alias: "Data: Water Heater Power"
+  trigger:
+    - platform: state
+      entity_id: sensor.water_heater_power
+  action:
+    - service: mqtt.publish
+      data:
+        topic: "solar/eva/node/water_heater/power"
+        payload: "{{ states('sensor.water_heater_power') | float }}"
+        qos: "1"
+        retain: true
+
+- id: data_pub_water_heater_state
+  alias: "Data: Water Heater State"
+  trigger:
+    - platform: state
+      entity_id: switch.water_heater
+  action:
+    - service: mqtt.publish
+      data:
+        topic: "solar/eva/node/water_heater/state"
+        payload: "{{ states('switch.water_heater') | upper }}"
+        qos: "1"
+        retain: true
+
+- id: data_pub_ac_power
+  alias: "Data: Air Conditioner Power"
+  trigger:
+    - platform: state
+      entity_id: sensor.air_conditioner_power
+  action:
+    - service: mqtt.publish
+      data:
+        topic: "solar/eva/node/air_conditioner/power"
+        payload: "{{ states('sensor.air_conditioner_power') | float }}"
+        qos: "1"
+        retain: true
+
+- id: data_pub_ac_state
+  alias: "Data: Air Conditioner State"
+  trigger:
+    - platform: state
+      entity_id: switch.air_conditioner
+  action:
+    - service: mqtt.publish
+      data:
+        topic: "solar/eva/node/air_conditioner/state"
+        payload: "{{ states('switch.air_conditioner') | upper }}"
+        qos: "1"
+        retain: true
+
+- id: data_pub_ev_power
+  alias: "Data: EV Charger Power"
+  trigger:
+    - platform: state
+      entity_id: sensor.ev_charger_power
+  action:
+    - service: mqtt.publish
+      data:
+        topic: "solar/eva/node/ev_charger/power"
+        payload: "{{ states('sensor.ev_charger_power') | float }}"
+        qos: "1"
+        retain: true
+
+- id: data_pub_ev_state
+  alias: "Data: EV Charger State"
+  trigger:
+    - platform: state
+      entity_id: switch.ev_charger
+  action:
+    - service: mqtt.publish
+      data:
+        topic: "solar/eva/node/ev_charger/state"
+        payload: "{{ states('switch.ev_charger') | upper }}"
+        qos: "1"
+        retain: true
+
+- id: data_pub_tv_power
+  alias: "Data: Living Room TV Power"
+  trigger:
+    - platform: state
+      entity_id: sensor.living_room_tv_power
+  action:
+    - service: mqtt.publish
+      data:
+        topic: "solar/eva/node/living_room_tv/power"
+        payload: "{{ states('sensor.living_room_tv_power') | float }}"
+        qos: "1"
+        retain: true
+
+- id: data_pub_tv_state
+  alias: "Data: Living Room TV State"
+  trigger:
+    - platform: state
+      entity_id: switch.living_room_tv
+  action:
+    - service: mqtt.publish
+      data:
+        topic: "solar/eva/node/living_room_tv/state"
+        payload: "{{ states('switch.living_room_tv') | upper }}"
+        qos: "1"
+        retain: true
+
+- id: data_pub_coffee_power
+  alias: "Data: Coffee Maker Power"
+  trigger:
+    - platform: state
+      entity_id: sensor.coffee_maker_power
+  action:
+    - service: mqtt.publish
+      data:
+        topic: "solar/eva/node/coffee_maker/power"
+        payload: "{{ states('sensor.coffee_maker_power') | float }}"
+        qos: "1"
+        retain: true
+
+- id: data_pub_coffee_state
+  alias: "Data: Coffee Maker State"
+  trigger:
+    - platform: state
+      entity_id: switch.coffee_maker
+  action:
+    - service: mqtt.publish
+      data:
+        topic: "solar/eva/node/coffee_maker/state"
+        payload: "{{ states('switch.coffee_maker') | upper }}"
+        qos: "1"
+        retain: true

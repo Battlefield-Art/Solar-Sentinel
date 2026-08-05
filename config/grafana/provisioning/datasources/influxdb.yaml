@@ -1,5 +1,5 @@
 # Grafana InfluxDB Datasource Provisioning
-# This file auto-configures the InfluxDB 2.x connection
+# This file is regenerated at boot by scripts/influx-init.sh with the real token.
 
 apiVersion: 1
 
@@ -16,12 +16,7 @@ datasources:
       defaultBucket: solar_forecast
       tlsSkipVerify: false
     secureJsonData:
-      token: ${INFLUXDB_TOKEN:my-token}
-    # Fallback for InfluxDB 1.x compatibility
-    database: solar
-    databaseUser: ${INFLUXDB_USER:admin}
-    secureJsonData:
-      password: ${INFLUXDB_PASSWORD:admin}
+      token: ${INFLUXDB_TOKEN:}
 
   - name: InfluxDB_State
     type: influxdb
@@ -35,4 +30,4 @@ datasources:
       defaultBucket: system_state
       tlsSkipVerify: false
     secureJsonData:
-      token: ${INFLUXDB_TOKEN:my-token}
+      token: ${INFLUXDB_TOKEN:}

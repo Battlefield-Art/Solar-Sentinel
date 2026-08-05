@@ -21,15 +21,7 @@ ARG INFLUXDB_SHA256=9343715d012497672807f43350257367f607c3970b55ed9969299ed30155
 RUN curl -fsSL https://dl.influxdata.com/influxdb/releases/influxdb2-${INFLUXDB_VERSION}_linux_amd64.tar.gz -o influxdb.tar.gz \
     && /usr/local/bin/validate-sha256.sh influxdb.tar.gz ${INFLUXDB_SHA256}
 
-# Stage 2: Build Open-Meteo
-FROM golang:1.21-alpine3.19 AS open-meteo-builder
-ARG OPEN_METEO_VERSION=1.2.1
-RUN apk add --no-cache git
-RUN git clone --branch v${OPEN_METEO_VERSION} https://github.com/open-meteo/open-meteo.git /src
-WORKDIR /src
-RUN go build -o /usr/local/bin/open-meteo .
-
-# Stage 3: Energy Guard (Custom Service)
+# Stage 2: Energy Guard (Custom Service)
 FROM alpine:3.19 AS energy-guard-builder
 WORKDIR /app
 COPY config/energy-guard/guard.py energy-guard
@@ -40,20 +32,35 @@ FROM alpine:3.19
 
 # Install runtime dependencies
 RUN apk add --no-cache \
-    python3=3.11.10-r0 \
+    python3=3.11.14-r0 \
     py3-pip=23.3.1-r0 \
     nodejs=20.15.1-r0 \
     npm=10.2.5-r0 \
     mosquitto=2.0.18-r0 \
     mosquitto-clients=2.0.18-r0 \
-    supervisor=4.2.5-r2 \
+    supervisor=4.2.5-r4 \
     bash=5.2.21-r0 \
-    curl=8.9.1-r1 \
-    libc6-compat=1.2.4-r2 \
-    ca-certificates=20240226-r0 \
+    curl=8.14.1-r2 \
+    libc6-compat=1.1.0-r4 \
+    ca-certificates=20250911-r0 \
     util-linux=2.39.3-r0 \
-    smartmontools=7.4-r0 \
-    git=2.43.5-r0
+    smartmontools=7.4-r1 \
+    git=2.43.7-r0 \
+    netcat-openbsd=1.226-r0 \
+    jq=1.7.1-r0 \
+    # Build toolchain so pip/npm can compile wheels missing musl builds
+    # (e.g. cryptography, h5py, lxml, better-sqlite3)
+    build-base \
+    musl-dev \
+    python3-dev \
+    linux-headers \
+    openssl-dev \
+    libffi-dev \
+    rust \
+    cargo \
+    hdf5-dev \
+    libxml2-dev \
+    zlib-dev
 
 # Create non-root user
 RUN addgroup -S solar && adduser -S solar -G solar
@@ -65,16 +72,19 @@ RUN mkdir -p /var/log/supervisor /etc/supervisor/conf.d /data /config /var/lib/i
 COPY requirements.txt /tmp/requirements.txt
 # Pin homeassistant to specific version for stability
 ARG HOMEASSISTANT_VERSION=2024.2.1
+# Install project deps (with their transitive deps) first, then Home Assistant
+# so HA's own pins win on any conflicts.
+RUN pip3 install --no-cache-dir --break-system-packages -r /tmp/requirements.txt
 RUN pip3 install --no-cache-dir --break-system-packages homeassistant==${HOMEASSISTANT_VERSION}
-RUN pip3 install --no-cache-dir --break-system-packages --no-deps -r /tmp/requirements.txt
 
 # Copy supervisord config
 COPY supervisord.conf /etc/supervisor/supervisord.conf
 
-# Install Node-RED
+# Install Node-RED + dashboard UI nodes
 ARG NODERED_VERSION=3.1.3
+ARG NODERED_DASHBOARD_VERSION=3.6.5
 WORKDIR /usr/share/node-red
-RUN echo '{"dependencies": {"node-red": "'${NODERED_VERSION}'"}}' > package.json \
+RUN echo '{"dependencies": {"node-red": "'${NODERED_VERSION}'", "node-red-dashboard": "'${NODERED_DASHBOARD_VERSION}'"}}' > package.json \
     && npm install \
     && npm ci --production \
     && ln -s /usr/share/node-red/node_modules/.bin/node-red /usr/local/bin/node-red
@@ -99,8 +109,9 @@ RUN mkdir -p /usr/share/grafana \
     && rm /tmp/grafana.tar.gz \
     && ln -s /usr/share/grafana/bin/grafana-server /usr/local/bin/grafana-server
 
-# Copy Open-Meteo
-COPY --from=open-meteo-builder /usr/local/bin/open-meteo /usr/local/bin/open-meteo
+# Copy Open-Meteo is not built here - run it as an optional separate compose
+# service using upstream's own image (see docker-compose.yml). The Energy Guard
+# falls back to the public Open-Meteo API when it is not reachable.
 
 # Copy Energy Guard
 COPY --from=energy-guard-builder /app/energy-guard /usr/local/bin/energy-guard
@@ -121,7 +132,7 @@ RUN ln -s /etc/homeassistant /config/homeassistant
 RUN chown -R solar:solar /data /config /var/lib/influxdb2 /var/lib/grafana /mosquitto /var/log/supervisor
 
 # Expose ports
-EXPOSE 8123 3000 1883 1880 3001 8080
+EXPOSE 8123 3000 1883 1880 3001
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
   CMD /usr/local/bin/healthcheck.sh

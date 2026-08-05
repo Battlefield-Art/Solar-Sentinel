@@ -1,7 +1,7 @@
 default_config:
 
 # Text to speech
-t2:
+tts:
   - platform: google_translate
 
 automation: !include automations.yaml

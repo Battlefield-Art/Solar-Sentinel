@@ -1,0 +1,9 @@
+# Normalize line endings for container-runtime files.
+# CRLF in shell scripts breaks bash inside the container.
+*.sh       text eol=lf
+*.py       text eol=lf
+Dockerfile text eol=lf
+supervisord.conf text eol=lf
+mosquitto.conf  text eol=lf
+*.env      text eol=lf
+.env.example text eol=lf

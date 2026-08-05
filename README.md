@@ -2,6 +2,55 @@
 
 Advanced Energy Management & Backup System.
 
+## Quick Start
+
+### Prerequisites
+- **Docker + Docker Compose** on a Linux host (or Docker Desktop).
+- x86_64 machine (the image downloads `linux-amd64` binaries).
+
+### Installation
+```bash
+# 1. Clone
+git clone https://github.com/menotbobbybrown/Solar-Sentinel.git
+cd Solar-Sentinel
+
+# 2. Configure secrets (CHANGE the default passwords!)
+cp .env.example .env
+#   edit .env: MQTT_USER/MQTT_PASS, GF_SECURITY_ADMIN_PASSWORD, GEMINI_API_KEY
+
+# 3. Build and start
+docker compose up -d --build
+
+# 4. (Optional) build the self-hosted weather service
+docker compose up -d --build open-meteo
+```
+
+### First-Boot Behavior
+- **InfluxDB** is onboarded automatically — the admin token is generated and
+  stored at `/data/influxdb/.admin_token` (also `/data/influxdb/influx.env`).
+  Buckets are created with 5-year retention.
+- **MQTT** auth is enforced. Guard, Hermes, Node-RED, Home Assistant, and the
+  maintenance scripts all use the credentials from `.env`.
+- **Grafana** admin password comes from `GF_SECURITY_ADMIN_PASSWORD`.
+
+### After Boot — Wire Your Sensors (required for live data)
+Open `config/homeassistant/automations.yaml`, **SECTION 6: DATA PUBLISHERS**,
+and point the placeholder entities at your real sensors:
+- `sensor.battery_soc` → `solar/battery/soc`
+- `sensor.solar_power` → `solar/pv/power`
+- `sensor.<device>_power` / `switch.<device>` → `solar/eva/node/<device>/...`
+
+Without these, Energy Guard runs on defaults and EVA has no node data.
+
+### Access
+| Service | URL |
+|---------|-----|
+| Home Assistant | http://localhost:8123 |
+| Grafana | http://localhost:3000 |
+| Node-RED | http://localhost:1880 |
+| Uptime Kuma | http://localhost:3001 |
+| MQTT | localhost:1883 |
+
 ## Phase 3: USB Backup + 20-Year Hardening
 This version includes comprehensive system hardening and a robust USB-based backup and recovery strategy designed for long-term reliability.
 
@@ -12,8 +61,12 @@ This version includes comprehensive system hardening and a robust USB-based back
 4. **Mosquitto 2.0.18** - MQTT broker.
 5. **Node-RED 3.1.3** - Flow-based automation.
 6. **Uptime Kuma 1.23.11** - Monitoring and uptime checks.
-7. **Open-Meteo v1.2.1** - Self-hosted weather API.
-8. **Energy Guard** - Custom energy monitoring and protection service.
+7. **Energy Guard** - Custom energy monitoring and protection service.
+
+> **Weather (Open-Meteo):** Optional. `docker-compose.yml` includes an
+> `open-meteo` service built from upstream's Dockerfile (slow first build). If
+> you skip it or it is unreachable, Energy Guard automatically falls back to the
+> public `api.open-meteo.com` — everything still works.
 
 ## Operational Guide
 
@@ -67,14 +120,40 @@ See `/data/RECOVERY.md` for full details.
 | Mosquitto | 1883 | localhost:1883 |
 | Node-RED | 1880 | http://localhost:1880 |
 | Uptime Kuma | 3001 | http://localhost:3001 |
-| Open-Meteo | 8080 | http://localhost:8080 |
 
 ### Environment Variables (First-Boot Checklist)
-Ensure the following are set in your environment or `.env` file:
-- `INFLUX_TOKEN`: Administrative token for InfluxDB.
-- `NTFY_TOPIC`: Topic for ntfy alerts (default: `solar_sentinel_alerts`).
-- `LATITUDE` / `LONGITUDE`: For solar forecast accuracy.
-- `OPEN_METEO_URL`: URL for the weather service (default: `http://localhost:8080`).
+Copy `.env.example` to `.env` and set your values before the first boot:
+
+- `MQTT_USER` / `MQTT_PASS`: MQTT broker credentials (auth is now enforced — **change the defaults**).
+- `GF_SECURITY_ADMIN_PASSWORD`: Grafana admin password (**change the default**).
+- `GEMINI_API_KEY`: Required for the Hermes AI agent.
+- `INFLUXDB_ORG`: Organization name (default `my-org`).
+- `INFLUX_ADMIN_PASSWORD`: Optional; if empty a random password is generated on first boot.
+
+Notes:
+- The InfluxDB admin token is **generated automatically on first boot** and stored at `/data/influxdb/influx.env` and `/data/influxdb/.admin_token`. Guard, Hermes, Grafana, and Home Assistant all read it from there — no need to set `INFLUXDB_TOKEN`.
+- Buckets (`solar_forecast`, `system_state`, `eva_nodes`, `eva_patterns`) are created automatically with a 5-year retention (override with `INFLUX_RETENTION_SECONDS`).
+
+### Wiring Your Sensors (required for live data)
+Energy Guard and EVA consume real-time data over MQTT. Open
+`config/homeassistant/automations.yaml`, go to **SECTION 6: DATA PUBLISHERS**, and
+point the placeholder entities at your real Home Assistant sensors:
+- `sensor.battery_soc` → battery state of charge (published to `solar/battery/soc`)
+- `sensor.solar_power` → current PV production in W (published to `solar/pv/power`)
+- `sensor.<device>_power` / `switch.<device>` → per-device power and state for each
+  appliance in the EVA registry (published to `solar/eva/node/<device>/power|state`)
+
+Without these, Guard runs on its defaults and EVA has no node data.
+
+### USB Backup Inside Docker
+The maintenance scripts run inside the container, so the host USB drive must be
+visible. Either pass the device through, or mount it and export `USB_MOUNT`:
+```bash
+docker run ... -e USB_MOUNT=/media/usb \
+  -v /media/usb:/media/usb:ro solar-sentinel-aio:v3
+```
+The host-side alternative is to run `data/scripts/usb_backup.sh` directly on the
+host (see `data/scripts/laptop_hardening.sh`).
 
 ## Talking to Hermes
 Hermes is the natural language interface for Solar-Sentinel-AIO. You can interact with it using three methods:

@@ -46,8 +46,24 @@ MQTT_USER = os.getenv("MQTT_USER", None)
 MQTT_PASS = os.getenv("MQTT_PASS", None)
 
 INFLUXDB_URL = os.getenv("INFLUXDB_URL", "http://localhost:8086")
-INFLUXDB_TOKEN = os.getenv("INFLUXDB_TOKEN", "my-token")
 INFLUXDB_ORG = os.getenv("INFLUXDB_ORG", "my-org")
+
+def _influx_token():
+    token = os.getenv("INFLUXDB_TOKEN", "")
+    if not token or token == "my-token":
+        env_file = "/data/influxdb/influx.env"
+        if os.path.exists(env_file):
+            try:
+                with open(env_file) as f:
+                    for line in f:
+                        line = line.strip()
+                        if line.startswith("INFLUXDB_TOKEN="):
+                            return line.split("=", 1)[1]
+            except Exception:
+                pass
+    return token or "my-token"
+
+INFLUXDB_TOKEN = _influx_token()
 INFLUXDB_BUCKET_FORECAST = os.getenv("INFLUXDB_BUCKET_FORECAST", "solar_forecast")
 INFLUXDB_BUCKET_STATE = os.getenv("INFLUXDB_BUCKET_STATE", "system_state")
 INFLUXDB_BUCKET_EVA_NODES = os.getenv("INFLUXDB_BUCKET_EVA_NODES", "eva_nodes")
@@ -62,6 +78,7 @@ PANEL_TEMP_COEFF = float(os.getenv("PANEL_TEMP_COEFF", -0.0026))
 PANEL_AREA = float(os.getenv("PANEL_AREA", 20.0))
 
 NTFY_URL = os.getenv("NTFY_URL", "https://ntfy.sh/solar_sentinel_guard_alerts")
+OPEN_METEO_URL = os.getenv("OPEN_METEO_URL", "http://localhost:8080")
 
 # SOC Thresholds
 SOC_LOCKOUT = float(os.getenv("SOC_LOCKOUT", 20.0))
@@ -76,6 +93,14 @@ EVA_LOCKOUT_HYSTERESIS_MIN = int(os.getenv("EVA_LOCKOUT_HYSTERESIS_MIN", 2))
 
 SOC_HYSTERESIS = 2.0
 POWER_HYSTERESIS = 100
+
+TIER_ORDER = ["LOCKOUT", "WARNING", "ADVISORY", "NOMINAL", "ABUNDANCE"]
+
+def tier_index(tier):
+    try:
+        return TIER_ORDER.index(tier)
+    except ValueError:
+        return TIER_ORDER.index("NOMINAL")
 
 # ============================================================================
 # SECTION B: LOGGING SETUP
@@ -120,9 +145,13 @@ state = {
         "patterns": {},
         "recommendations": [],
         "last_optimal_window": None,
+        "scheduled_devices": {},
+        "last_window_started_notified": None,
         "phantom_cuts_performed": 0
     }
 }
+
+state_lock = threading.RLock()
 
 def load_state():
     global state
@@ -141,8 +170,9 @@ def load_state():
 def save_state():
     state["timestamp"] = datetime.now().isoformat()
     try:
-        with open(STATE_FILE, 'w') as f:
-            json.dump(state, f, indent=4)
+        with state_lock:
+            with open(STATE_FILE, 'w') as f:
+                json.dump(state, f, indent=4)
     except Exception as e:
         logger.error(f"Error saving state: {e}")
 
@@ -175,6 +205,7 @@ MQTT_TOPICS = {
     "eva_nodes": "solar/eva/node/#",
     "eva_command": "solar/eva/command",
     "eva_optimal_window": "solar/eva/optimal_window",
+    "eva_device_schedule": "solar/eva/device/#",
 }
 
 mqtt_client = mqtt.Client(client_id="solar_guard")
@@ -190,6 +221,7 @@ def on_connect(client, userdata, flags, rc):
         client.subscribe(MQTT_TOPICS["guard_command"])
         client.subscribe(MQTT_TOPICS["eva_nodes"])
         client.subscribe(MQTT_TOPICS["eva_command"])
+        client.subscribe(MQTT_TOPICS["eva_device_schedule"])
         client.publish(MQTT_TOPICS["guard_status"], "ONLINE", retain=True)
     else:
         logger.error(f"Failed to connect to MQTT, rc={rc}")
@@ -198,23 +230,28 @@ def on_message(client, userdata, msg):
     global state
     try:
         payload = msg.payload.decode()
-        if msg.topic == MQTT_TOPICS["battery_soc"]:
-            state["current_soc"] = float(payload)
-        elif msg.topic == MQTT_TOPICS["pv_power"]:
-            state["current_watts"] = float(payload)
-        elif msg.topic.startswith(MQTT_TOPICS["guard_config"]):
-            key = msg.topic.split("/")[-1]
-            state["config"][key] = float(payload)
-            save_state()
-        elif msg.topic == MQTT_TOPICS["guard_command"]:
-            if payload == "FORCE_FORECAST": update_forecast()
-            elif payload == "FORCE_DECISION": run_decision_engine()
-        elif msg.topic.startswith("solar/eva/node/"):
-            parts = msg.topic.split("/")
-            if len(parts) >= 5:
-                handle_eva_node_update(parts[3], parts[4], payload)
+        with state_lock:
+            if msg.topic == MQTT_TOPICS["battery_soc"]:
+                state["current_soc"] = float(payload)
+            elif msg.topic == MQTT_TOPICS["pv_power"]:
+                state["current_watts"] = float(payload)
+            elif msg.topic.startswith(MQTT_TOPICS["guard_config"]):
+                key = msg.topic.split("/")[-1]
+                state["config"][key] = float(payload)
+                save_state()
+            elif msg.topic.startswith(MQTT_TOPICS["eva_device_schedule"]):
+                handle_eva_device_schedule(msg.topic, payload)
+            elif msg.topic.startswith("solar/eva/node/"):
+                parts = msg.topic.split("/")
+                if len(parts) >= 5:
+                    handle_eva_node_update(parts[3], parts[4], payload)
+        if msg.topic == MQTT_TOPICS["guard_command"]:
+            if payload == "FORCE_FORECAST":
+                threading.Thread(target=update_forecast, daemon=True).start()
+            elif payload == "FORCE_DECISION":
+                threading.Thread(target=run_decision_engine, daemon=True).start()
         elif msg.topic == MQTT_TOPICS["eva_command"]:
-            handle_eva_command(payload)
+            threading.Thread(target=handle_eva_command, args=(payload,), daemon=True).start()
     except Exception as e:
         logger.error(f"MQTT msg error: {e}")
 
@@ -254,12 +291,16 @@ def init_influx():
 # ============================================================================
 
 def get_weather_forecast():
-    for url in [f"http://localhost:8080/v1/forecast?latitude={LATITUDE}&longitude={LONGITUDE}&hourly=cloudcover,temperature_2m&timezone={TIMEZONE}",
-                f"https://api.open-meteo.com/v1/forecast?latitude={LATITUDE}&longitude={LONGITUDE}&hourly=cloudcover,temperature_2m&timezone={TIMEZONE}"]:
+    urls = [
+        f"{OPEN_METEO_URL}/v1/forecast?latitude={LATITUDE}&longitude={LONGITUDE}&hourly=cloudcover,temperature_2m&timezone={TIMEZONE}",
+        f"https://api.open-meteo.com/v1/forecast?latitude={LATITUDE}&longitude={LONGITUDE}&hourly=cloudcover,temperature_2m&timezone={TIMEZONE}",
+    ]
+    for url in urls:
         try:
             res = requests.get(url, timeout=10)
             if res.status_code == 200: return res.json()
-        except: continue
+        except Exception:
+            continue
     return None
 
 def update_forecast():
@@ -275,8 +316,12 @@ def update_forecast():
         
         forecast_data = []
         daily_yields = {}
+        temps = weather['hourly'].get('temperature_2m')
         for i in range(len(times)):
-            power = PANEL_AREA * clearsky['ghi'].iloc[i] * PANEL_EFFICIENCY * (1 - 0.75 * (cloudcover[i]/100.0)**3)
+            power = PANEL_AREA * clearsky['ghi'].iloc[i] * PANEL_EFFICIENCY
+            if temps is not None:
+                power *= (1.0 + PANEL_TEMP_COEFF * (temps[i] - 25.0))
+            power *= (1 - 0.75 * (cloudcover[i] / 100.0) ** 3)
             power = max(0, power)
             day_str = times[i].strftime("%Y-%m-%d")
             daily_yields[day_str] = daily_yields.get(day_str, 0) + (power / 1000.0)
@@ -295,38 +340,61 @@ def update_forecast():
 
 def run_decision_engine():
     global state
-    soc = state["current_soc"]
-    cfg = state["config"]
-    current_tier = state["current_tier"]
-    
-    # Calculate worst_3day
-    now_tz = datetime.now(pytz.timezone(TIMEZONE))
-    forecast_daily = state.get("forecast_daily_kwh", {})
-    next_3_days = [forecast_daily.get((now_tz + timedelta(days=i)).strftime("%Y-%m-%d"), 0.0) for i in range(3)]
-    worst_3day = min(next_3_days) if next_3_days else 0.0
-    
-    new_tier = "NOMINAL"
-    if worst_3day < 0.8: new_tier = "LOCKOUT"
-    elif worst_3day < 2.5: new_tier = "WARNING"
-    elif soc < cfg["soc_lockout"]: new_tier = "LOCKOUT"
-    elif soc < cfg["soc_warning"]: new_tier = "WARNING"
-    elif soc < cfg["soc_advisory"]: new_tier = "ADVISORY"
-    elif soc > cfg["soc_abundance"] and state["current_watts"] > 2000: new_tier = "ABUNDANCE"
-    
-    if new_tier != current_tier:
-        state["previous_tier"] = current_tier
-        state["current_tier"] = new_tier
-        logger.info(f"Tier transition: {current_tier} -> {new_tier}")
-        
-        # Handle EVA-aware lockout logic
-        if new_tier == "LOCKOUT": 
-            eva_smart_lockout()
-        elif current_tier in ["LOCKOUT", "WARNING"] and new_tier == "NOMINAL": 
-            unlock_all_appliances()
-            
-        publish_alert(f"Tier changed to {new_tier}. SOC: {soc}%, Forecast Worst: {worst_3day:.2f}kWh", 
-                      old_tier=current_tier, new_tier=new_tier)
-    save_state()
+    with state_lock:
+        soc = state["current_soc"]
+        watts = state["current_watts"]
+        cfg = state["config"]
+        current_tier = state["current_tier"]
+
+        # Calculate worst_3day
+        now_tz = datetime.now(pytz.timezone(TIMEZONE))
+        forecast_daily = state.get("forecast_daily_kwh", {})
+        next_3_days = [forecast_daily.get((now_tz + timedelta(days=i)).strftime("%Y-%m-%d"), 0.0) for i in range(3)]
+        worst_3day = min(next_3_days) if next_3_days else 0.0
+
+        def soc_tier(offset):
+            if soc < cfg["soc_lockout"] + offset: return "LOCKOUT"
+            if soc < cfg["soc_warning"] + offset: return "WARNING"
+            if soc < cfg["soc_advisory"] + offset: return "ADVISORY"
+            if soc > cfg["soc_abundance"] + offset and watts > 2000 + POWER_HYSTERESIS: return "ABUNDANCE"
+            return "NOMINAL"
+
+        def forecast_floor():
+            if worst_3day < 0.8: return "LOCKOUT"
+            if worst_3day < 2.5: return "WARNING"
+            return "NOMINAL"
+
+        floor = forecast_floor()
+        entry_tier = soc_tier(0.0)
+        candidate = entry_tier if tier_index(entry_tier) < tier_index(floor) else floor
+
+        if tier_index(candidate) < tier_index(current_tier):
+            # Becoming more restrictive: use raw entry thresholds
+            new_tier = candidate
+        else:
+            # Holding or recovering: require hysteresis margin before relaxing.
+            # The forecast floor only ever forces restriction, so ABUNDANCE is
+            # only suppressed when the forecast itself is restrictive.
+            recovery_tier = soc_tier(SOC_HYSTERESIS)
+            if floor in ("LOCKOUT", "WARNING"):
+                new_tier = recovery_tier if tier_index(recovery_tier) < tier_index(floor) else floor
+            else:
+                new_tier = recovery_tier
+
+        if new_tier != current_tier:
+            state["previous_tier"] = current_tier
+            state["current_tier"] = new_tier
+            logger.info(f"Tier transition: {current_tier} -> {new_tier}")
+
+            # Handle EVA-aware lockout logic
+            if new_tier == "LOCKOUT":
+                eva_smart_lockout()
+            elif current_tier in ["LOCKOUT", "WARNING"] and new_tier == "NOMINAL":
+                unlock_all_appliances()
+
+            publish_alert(f"Tier changed to {new_tier}. SOC: {soc}%, Forecast Worst: {worst_3day:.2f}kWh",
+                          old_tier=current_tier, new_tier=new_tier)
+        save_state()
 
 # ============================================================================
 # SECTION H: EVA SYSTEM
@@ -458,6 +526,7 @@ def eva_smart_lockout():
                         "reason": "low_battery_shift"
                     })
                     mqtt_client.publish(f"solar/eva/device/{device_id}/schedule", schedule_msg, retain=True)
+                    state["eva"].setdefault("scheduled_devices", {})[device_id] = optimal_window["start_time"]
                     scheduled.append(device_id)
                 else:
                     # No optimal window, fall back to lock
@@ -489,6 +558,77 @@ def unlock_all_appliances():
     for device_id in registry:
         mqtt_client.publish(f"solar/appliance/{device_id}/lock", "UNLOCK", retain=True)
     logger.info("EVA Unlock: All appliances")
+
+def handle_eva_device_schedule(topic, payload):
+    """Record a device scheduled for the optimal window from MQTT"""
+    parts = topic.split("/")
+    if len(parts) < 4:
+        return
+    device_id = parts[3]
+    try:
+        data = json.loads(payload)
+        scheduled_time = data.get("scheduled_time") if isinstance(data, dict) else None
+        if not scheduled_time:
+            scheduled_time = payload
+        state["eva"].setdefault("scheduled_devices", {})[device_id] = scheduled_time
+        logger.info(f"EVA: {device_id} scheduled for {scheduled_time}")
+        save_state()
+    except Exception as e:
+        logger.error(f"EVA: bad schedule payload: {e}")
+
+def eva_release_due_devices():
+    """Unlock scheduled devices whose scheduled start time has been reached"""
+    scheduled = state["eva"].get("scheduled_devices", {})
+    if not scheduled:
+        return
+    now = datetime.now(pytz.timezone(TIMEZONE))
+    due = []
+    for device_id, sched_time in list(scheduled.items()):
+        try:
+            sched_dt = datetime.fromisoformat(str(sched_time))
+            if sched_dt.tzinfo is None:
+                sched_dt = sched_dt.replace(tzinfo=now.tzinfo)
+            if sched_dt <= now:
+                due.append(device_id)
+        except Exception:
+            continue
+    for device_id in due:
+        mqtt_client.publish(f"solar/appliance/{device_id}/lock", "UNLOCK", retain=True)
+        del scheduled[device_id]
+        logger.info(f"EVA: Released scheduled device {device_id}")
+        publish_alert(f"EVA: Released scheduled device {device_id}", priority="low")
+    if due:
+        save_state()
+
+def eva_release_scheduled_devices_now():
+    """Manual release of all scheduled devices (RELEASE_SCHEDULED_DEVICES command)"""
+    scheduled = state["eva"].get("scheduled_devices", {})
+    for device_id in list(scheduled.keys()):
+        mqtt_client.publish(f"solar/appliance/{device_id}/lock", "UNLOCK", retain=True)
+        del scheduled[device_id]
+        logger.info(f"EVA: Released scheduled device {device_id} (manual release)")
+    save_state()
+
+def eva_check_window_start():
+    """Publish window_started event once the optimal window start time is reached"""
+    window = state["eva"].get("last_optimal_window")
+    if not window or not window.get("start_time"):
+        return
+    start = window["start_time"]
+    if state["eva"].get("last_window_started_notified") == start:
+        return
+    try:
+        start_dt = datetime.fromisoformat(start)
+        now = datetime.now(pytz.timezone(TIMEZONE))
+        if start_dt.tzinfo is None:
+            start_dt = start_dt.replace(tzinfo=now.tzinfo)
+        if now >= start_dt:
+            mqtt_client.publish("solar/eva/window_started", json.dumps(window), retain=True)
+            state["eva"]["last_window_started_notified"] = start
+            save_state()
+            logger.info("EVA: Optimal window has started")
+    except Exception as e:
+        logger.error(f"EVA: window start check error: {e}")
 
 # H-5: Pattern Learning from InfluxDB
 def eva_pattern_learning():
@@ -633,6 +773,7 @@ def handle_eva_command(payload):
         "PUBLISH_MAP": eva_publish_map,
         "EVA_OPTIMIZE": eva_optimal_window_finder,
         "EVA_LEARN": eva_pattern_learning,
+        "RELEASE_SCHEDULED_DEVICES": eva_release_scheduled_devices_now,
         "RELOAD_REGISTRY": lambda: logger.info("EVA: Registry reload requested")
     }
     
@@ -659,6 +800,10 @@ def setup_eva_schedule():
     
     # Recommendations generation - every 6 hours
     schedule.every(6).hours.do(eva_generate_recommendations)
+    
+    # Release due scheduled devices and check window start - every minute
+    schedule.every().minute.do(eva_release_due_devices)
+    schedule.every().minute.do(eva_check_window_start)
 
 # ============================================================================
 # ALERTS & NOTIFICATIONS
@@ -677,14 +822,14 @@ def publish_alert(msg, old_tier=None, new_tier=None, priority="default", tags=""
     
     mqtt_client.publish(MQTT_TOPICS["alerts_guard"], json.dumps(alert))
     
-    try: 
+    try:
         requests.post(NTFY_URL, data=msg, headers={
-            "Title": "Solar Guard", 
-            "Priority": priority, 
+            "Title": "Solar Guard",
+            "Priority": priority,
             "Tags": tags
         }, timeout=5)
-    except: 
-        pass
+    except Exception as e:
+        logger.error(f"ntfy publish failed: {e}")
 
 # ============================================================================
 # MAIN

@@ -49,6 +49,19 @@ chown solar:solar /data/grafana/dashboards
 chown solar:solar /data/influxdb/engine
 chown solar:solar /data/guard
 
+# MQTT broker authentication (idempotent)
+echo "Configuring MQTT credentials..."
+MQTT_PASSWD_FILE="/etc/mosquitto/passwd"
+if [ ! -f "$MQTT_PASSWD_FILE" ] && [ -n "$MQTT_USER" ] && [ -n "$MQTT_PASS" ]; then
+    touch "$MQTT_PASSWD_FILE"
+    mosquitto_passwd -b "$MQTT_PASSWD_FILE" "$MQTT_USER" "$MQTT_PASS"
+    chown solar:solar "$MQTT_PASSWD_FILE"
+    chmod 600 "$MQTT_PASSWD_FILE"
+    echo "MQTT user '$MQTT_USER' configured."
+elif [ ! -f "$MQTT_PASSWD_FILE" ]; then
+    echo "WARNING: MQTT_USER/MQTT_PASS not set. Broker will reject clients until credentials are configured."
+fi
+
 # Run cron setup
 if [ -f "/data/scripts/setup_cron.sh" ]; then
     echo "Installing cron jobs..."
@@ -65,7 +78,9 @@ fi
 if [ ! -f "/data/node-red/flows.json" ]; then
     echo "Initializing Node-RED flows..."
     mkdir -p /data/node-red
-    cp /etc/node-red/flows.json /data/node-red/flows.json
+    sed -e "s|__MQTT_USER__|${MQTT_USER:-solar}|g" \
+        -e "s|__MQTT_PASSWORD__|${MQTT_PASS:-solar123}|g" \
+        /etc/node-red/flows.json > /data/node-red/flows.json
 fi
 
 # EVA Registry initialization (idempotent)
@@ -117,12 +132,6 @@ EVAEOF
     fi
 fi
 
-if [ ! -f "/data/uptime-kuma/monitors.json" ]; then
-    echo "Initializing Uptime Kuma monitors..."
-    mkdir -p /data/uptime-kuma
-    cp /etc/uptime-kuma/monitors.json /data/uptime-kuma/monitors.json
-fi
-
 # Hermes Agent Setup (idempotent)
 if [ ! -f "/data/agent/hermes_history.json" ]; then
     echo "Initializing Hermes history..."
@@ -132,52 +141,10 @@ fi
 # Copy hermes_agent.py from template to /data/agent (idempotent)
 if [ -f "/usr/share/solar-sentinel/data/agent/hermes_agent.py" ]; then
     cp /usr/share/solar-sentinel/data/agent/hermes_agent.py /data/agent/hermes_agent.py
-elif [ -f "/home/engine/project/data/agent/hermes_agent.py" ]; then
-    cp /home/engine/project/data/agent/hermes_agent.py /data/agent/hermes_agent.py
 fi
 
 if [ -f "/data/agent/hermes_agent.py" ]; then
     chmod +x /data/agent/hermes_agent.py
-fi
-
-# InfluxDB bucket initialization (idempotent)
-echo "Checking InfluxDB buckets..."
-INFLUX_READY=0
-for i in {1..30}; do
-    if curl -sf "http://localhost:8086/health" > /dev/null 2>&1; then
-        echo "InfluxDB is healthy"
-        INFLUX_READY=1
-        break
-    fi
-    echo "Waiting for InfluxDB to start... ($i/30)"
-    sleep 2
-done
-
-if [ "$INFLUX_READY" = "1" ]; then
-    # Set InfluxDB token and org from environment or defaults
-    INFLUX_TOKEN="${INFLUXDB_TOKEN:-my-token}"
-    INFLUX_ORG="${INFLUXDB_ORG:-my-org}"
-    INFLUX_URL="${INFLUXDB_URL:-http://localhost:8086}"
-    
-    # All required buckets for Phase 5 - idempotent check and create
-    ALL_BUCKETS=("solar_forecast" "system_state" "eva_nodes" "eva_patterns")
-    
-    for bucket in "${ALL_BUCKETS[@]}"; do
-        echo "Checking for $bucket bucket..."
-        if ! influx bucket list --token "$INFLUX_TOKEN" --org "$INFLUX_ORG" --host "$INFLUX_URL" 2>/dev/null | grep -q "$bucket"; then
-            echo "Creating $bucket bucket..."
-            influx bucket create --name "$bucket" --org "$INFLUX_ORG" --token "$INFLUX_TOKEN" --host "$INFLUX_URL" 2>/dev/null || \
-            curl -s -X POST "$INFLUX_URL/api/v2/buckets" \
-                -H "Authorization: Token $INFLUX_TOKEN" \
-                -H "Content-Type: application/json" \
-                -d "{\"name\":\"$bucket\",\"orgID\":\"$INFLUX_ORG\",\"retentionRules\":[]}" > /dev/null || \
-            echo "Warning: Could not create $bucket bucket (may already exist)"
-        else
-            echo "$bucket bucket already exists"
-        fi
-    done
-else
-    echo "Warning: InfluxDB not ready. Buckets will be created on first run."
 fi
 
 # Ensure influxdb data directory exists

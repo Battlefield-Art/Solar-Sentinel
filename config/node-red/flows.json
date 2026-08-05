@@ -32,7 +32,6 @@
         "type": "tab",
         "label": "Hermes Chat Interface",
         "disabled": false,
-        "info": "",
         "info": "Chat with the Hermes AI agent using natural language"
     },
     {
@@ -40,7 +39,6 @@
         "type": "tab",
         "label": "EVA Live Energy Map",
         "disabled": false,
-        "info": "",
         "info": "Real-time EVA Energy Value Architecture visualization"
     },
     {
@@ -48,7 +46,6 @@
         "type": "tab",
         "label": "EVA Device Manager",
         "disabled": false,
-        "info": "",
         "info": "Manage device priorities and trigger EVA functions"
     },
     {
@@ -58,6 +55,8 @@
         "broker": "localhost",
         "port": "1883",
         "clientid": "nodered-guard",
+        "username": "__MQTT_USER__",
+        "password": "__MQTT_PASSWORD__",
         "autoConnect": true,
         "usetls": false,
         "protocolVersion": "4",

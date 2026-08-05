@@ -56,12 +56,6 @@ if ! check_http 3001; then
     exit 1
 fi
 
-# Open-Meteo
-if ! check_http 8080; then
-    echo "Health check failed: Open-Meteo (port 8080) not responding"
-    exit 1
-fi
-
 # Energy Guard via supervisorctl
 if command -v supervisorctl >/dev/null 2>&1; then
     if ! check_supervisor_process energy-guard; then

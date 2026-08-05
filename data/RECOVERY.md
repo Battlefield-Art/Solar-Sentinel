@@ -2,6 +2,11 @@
 
 This guide covers scenarios for restoring the Solar-Sentinel-AIO system in case of hardware or software failure.
 
+> **InfluxDB token:** The admin token is generated on first boot and stored at
+> `/data/influxdb/.admin_token` (also in `/data/influxdb/influx.env`). Use it in
+> place of `YOUR_TOKEN`/`my-token` in the commands below:
+> `docker exec solar-sentinel cat /data/influxdb/.admin_token`
+
 ---
 
 ## Scenario 1: Laptop dead with USB backup
@@ -57,7 +62,7 @@ This guide covers scenarios for restoring the Solar-Sentinel-AIO system in case 
 2. Look in `/data/backups/influx_YYYYMMDD/` for daily snapshots.
 3. Use the influx restore command:
    ```bash
-   docker exec -it solar-sentinel influx restore /data/backups/influx_YYYYMMDD/ --token YOUR_TOKEN
+   docker exec -it solar-sentinel influx restore /data/backups/influx_YYYYMMDD/ --token $(docker exec solar-sentinel cat /data/influxdb/.admin_token)
    ```
 
 ---
@@ -177,13 +182,13 @@ docker exec solar-sentinel mosquitto_pub -t solar/eva/command -m "PUBLISH_MAP"
 
 ### Step 1: Verify Buckets Exist
 ```bash
-docker exec solar-sentinel influx bucket list --token my-token --org my-org
+docker exec solar-sentinel influx bucket list --token $(docker exec solar-sentinel cat /data/influxdb/.admin_token) --org my-org
 ```
 
 ### Step 2: Create Missing Buckets
 ```bash
-docker exec solar-sentinel influx bucket create --name eva_nodes --org my-org --token my-token
-docker exec solar-sentinel influx bucket create --name eva_patterns --org my-org --token my-token
+docker exec solar-sentinel influx bucket create --name eva_nodes --org my-org --token $(docker exec solar-sentinel cat /data/influxdb/.admin_token)
+docker exec solar-sentinel influx bucket create --name eva_patterns --org my-org --token $(docker exec solar-sentinel cat /data/influxdb/.admin_token)
 ```
 
 ### Step 3: Run Setup Script
@@ -275,10 +280,11 @@ curl -s http://localhost:8123/api/states | jq '.[] | select(.entity_id | startsw
 docker exec solar-sentinel influx query "from(bucket: \"solar_forecast\") |> range(start: -24h) |> limit(n:5)"
 ```
 
-### Step 2: Verify Open-Meteo Service
+### Step 2: Verify Weather Service
 ```bash
-curl -s http://localhost:8080/health
+# Local self-hosted open-meteo (if configured as a compose service):
 curl -s "http://localhost:8080/v1/forecast?latitude=25.2048&longitude=55.2708&hourly=temperature_2m&timezone=Asia/Dubai"
+# If unreachable, Energy Guard falls back to the public api.open-meteo.com.
 ```
 
 ### Step 3: Manually Trigger Optimization

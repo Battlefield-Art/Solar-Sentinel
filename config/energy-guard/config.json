@@ -1,7 +1,0 @@
-{
-    "polling_interval": 60,
-    "threshold_watts": 2000,
-    "mqtt_broker": "localhost",
-    "mqtt_port": 1883,
-    "influxdb_url": "http://localhost:8086"
-}

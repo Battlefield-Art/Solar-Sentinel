@@ -5,6 +5,10 @@
 LOG_FILE="/data/logs/health.log"
 mkdir -p /data/logs
 
+MQTT_ARGS=()
+[ -n "$MQTT_USER" ] && MQTT_ARGS=( -u "$MQTT_USER" -P "$MQTT_PASS" )
+NTFY_URL="${NTFY_URL:-https://ntfy.sh/solar_sentinel_alerts}"
+
 log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a "$LOG_FILE"
 }
@@ -56,7 +60,11 @@ if command -v supervisorctl >/dev/null 2>&1; then
 fi
 
 # 5. InfluxDB data freshness check (data within 30 min)
-INFLUX_TOKEN="${INFLUXDB_TOKEN:-my-token}"
+INFLUX_TOKEN="${INFLUXDB_TOKEN:-}"
+if [ -z "$INFLUX_TOKEN" ] && [ -f "/data/influxdb/influx.env" ]; then
+    . /data/influxdb/influx.env
+    INFLUX_TOKEN="${INFLUXDB_TOKEN}"
+fi
 if command -v influx >/dev/null 2>&1 && [ -n "$INFLUX_TOKEN" ]; then
     # Check for solar_forecast bucket data
     LAST_FORECAST=$(influx query 'from(bucket:"solar_forecast") |> range(start: -1h) |> last()' --token "$INFLUX_TOKEN" --org "${INFLUXDB_ORG:-my-org}" 2>/dev/null | head -5)
@@ -80,12 +88,12 @@ MSG_JOINED=$(IFS=,; echo "${MESSAGES[*]}")
 MQTT_PAYLOAD="{\"status\": \"$STATUS\", \"metrics\": \"$MSG_JOINED\", \"timestamp\": \"$(date -Iseconds)\"}"
 
 # Publish health_metrics to MQTT (standardized topic)
-mosquitto_pub -h localhost -t solar/system/health_metrics -m "$MQTT_PAYLOAD" 2>/dev/null || true
+mosquitto_pub -h localhost "${MQTT_ARGS[@]}" -t solar/system/health_metrics -m "$MQTT_PAYLOAD" 2>/dev/null || true
 
 # Send ntfy alerts on errors/warnings
 if [ "$STATUS" != "OK" ]; then
     log "$STATUS: $MSG_JOINED"
-    curl -s -d "Health Alert ($STATUS): $MSG_JOINED" ntfy.sh/solar_sentinel_alerts > /dev/null 2>&1 || true
+    curl -s -d "Health Alert ($STATUS): $MSG_JOINED" "$NTFY_URL" > /dev/null 2>&1 || true
 else
     log "Health Check: OK"
 fi

@@ -11,24 +11,29 @@ services:
       - "1883:1883"   # Mosquitto
       - "1880:1880"   # Node-RED
       - "3001:3001"   # Uptime Kuma
-      - "8080:8080"   # Open-Meteo
     volumes:
       - ./data:/data
     environment:
-      # MQTT Configuration
+      # Weather (self-hosted open-meteo service below, or public API fallback)
+      OPEN_METEO_URL: "${OPEN_METEO_URL:-http://open-meteo:8080}"
+      # MQTT Configuration (override via .env - defaults are NOT secure)
       MQTT_BROKER: "localhost"
       MQTT_PORT: 1883
-      MQTT_USER: "solar"
-      MQTT_PASS: "solar123"
+      MQTT_USER: "${MQTT_USER:-solar}"
+      MQTT_PASS: "${MQTT_PASS:-solar123}"
 
-      # InfluxDB Configuration
+      # InfluxDB Configuration (token is generated at first boot and stored in /data/influxdb/influx.env)
       INFLUXDB_URL: "http://localhost:8086"
-      INFLUXDB_TOKEN: "my-token"
-      INFLUXDB_ORG: "my-org"
+      INFLUXDB_ORG: "${INFLUXDB_ORG:-my-org}"
       INFLUXDB_BUCKET_FORECAST: "solar_forecast"
       INFLUXDB_BUCKET_STATE: "system_state"
       INFLUXDB_BUCKET_EVA_NODES: "eva_nodes"
       INFLUXDB_BUCKET_EVA_PATTERNS: "eva_patterns"
+      INFLUX_ADMIN_USER: "${INFLUX_ADMIN_USER:-solar}"
+      INFLUX_ADMIN_PASSWORD: "${INFLUX_ADMIN_PASSWORD:-}"
+
+      # Grafana admin password (override via .env)
+      GF_SECURITY_ADMIN_PASSWORD: "${GF_SECURITY_ADMIN_PASSWORD:-SolarSentinel2024}"
 
       # Gemini API (Hermes AI Agent)
       GEMINI_API_KEY: "${GEMINI_API_KEY}"
@@ -56,6 +61,24 @@ services:
       SOC_ADVISORY: "60.0"
       SOC_ABUNDANCE: "90.0"
 
+      # Electricity rate used by Hermes waste analysis (USD/kWh)
+      ELECTRICITY_RATE_USD_PER_KWH: "0.15"
+
       # Notifications
-      NTFY_URL: "https://ntfy.sh/solar_sentinel_guard_alerts"
+      NTFY_URL: "${NTFY_URL:-https://ntfy.sh/solar_sentinel_guard_alerts}"
     restart: unless-stopped
+
+  # Optional self-hosted weather service (Open-Meteo). Builds from upstream's
+  # own Dockerfile on first run (slow, Swift toolchain). If you skip it or it
+  # is unavailable, Energy Guard falls back to the public api.open-meteo.com.
+  open-meteo:
+    build:
+      context: https://github.com/open-meteo/open-meteo.git#1.2.1
+    image: solar-open-meteo:1.2.1
+    command: ["serve", "--env", "production", "--hostname", "0.0.0.0", "--port", "8080"]
+    volumes:
+      - openmeteo_data:/app/data
+    restart: unless-stopped
+
+volumes:
+  openmeteo_data:

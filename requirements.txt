@@ -6,14 +6,17 @@ google-generativeai==0.4.1
 protobuf==4.25.2
 google-api-core==2.16.0
 google-auth==2.27.0
+grpcio==1.60.1
 
 # Energy & Weather
 pvlib==0.10.3
 requests==2.31.0
+scipy==1.12.0
+h5py==3.11.0
 
 # MQTT & Data
 paho-mqtt==1.6.1
-influxdb-client==3.0.0
+influxdb-client==1.38.0
 pandas==2.2.0
 numpy==1.26.4
 
