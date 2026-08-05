@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 set -e
 
 # Usage: validate-sha256.sh <file_path> <expected_sha256>
