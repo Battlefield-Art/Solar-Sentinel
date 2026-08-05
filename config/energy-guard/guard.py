@@ -286,6 +286,15 @@ def init_influx():
             logger.error(f"InfluxDB init failed: {e}. Retrying...")
             time.sleep(10)
 
+def safe_write(bucket, records):
+    """Best-effort InfluxDB write that never raises (InfluxDB may be briefly down at boot)."""
+    if not write_api:
+        return
+    try:
+        write_api.write(bucket=bucket, record=records)
+    except Exception as e:
+        logger.warning(f"InfluxDB write failed ({bucket}): {e}")
+
 # ============================================================================
 # SECTION F: FORECAST ENGINE
 # ============================================================================
@@ -327,7 +336,8 @@ def update_forecast():
             daily_yields[day_str] = daily_yields.get(day_str, 0) + (power / 1000.0)
             forecast_data.append(Point("solar_forecast").time(times[i], WritePrecision.NS).field("power_w", float(power)))
             
-        if write_api: write_api.write(bucket=INFLUXDB_BUCKET_FORECAST, record=forecast_data)
+        if write_api:
+            safe_write(INFLUXDB_BUCKET_FORECAST, forecast_data)
         state["forecast_daily_kwh"] = daily_yields
         mqtt_client.publish(MQTT_TOPICS["forecast_7day"], round(sum(daily_yields.values()), 2))
         logger.info(f"Forecast updated. Next 3 days: {[daily_yields.get((datetime.now(pytz.timezone(TIMEZONE)) + timedelta(days=i)).strftime('%Y-%m-%d'), 0.0) for i in range(3)]}")
@@ -741,12 +751,11 @@ def eva_publish_map():
     mqtt_client.publish(MQTT_TOPICS["eva_map"], json.dumps(energy_map), retain=True)
     
     # Also write to InfluxDB for historical tracking
-    if write_api:
-        point = Point("eva_map")
-        point.field("soc", state["current_soc"])
-        point.field("pv_watts", state["current_watts"])
-        point.field("phantom_cuts", state["eva"]["phantom_cuts_performed"])
-        write_api.write(bucket=INFLUXDB_BUCKET_STATE, record=point)
+    point = Point("eva_map")
+    point.field("soc", state["current_soc"])
+    point.field("pv_watts", state["current_watts"])
+    point.field("phantom_cuts", state["eva"]["phantom_cuts_performed"])
+    safe_write(INFLUXDB_BUCKET_STATE, point)
 
 # H-7: Node Update Handler
 def handle_eva_node_update(node_id, data_type, payload):
@@ -759,9 +768,8 @@ def handle_eva_node_update(node_id, data_type, payload):
     if data_type == "power": 
         node["last_power"] = float(payload)
         # Write to InfluxDB
-        if write_api:
-            point = Point("eva_nodes").tag("node_id", node_id).field("power_w", float(payload))
-            write_api.write(bucket=INFLUXDB_BUCKET_EVA_NODES, record=point)
+        point = Point("eva_nodes").tag("node_id", node_id).field("power_w", float(payload))
+        safe_write(INFLUXDB_BUCKET_EVA_NODES, point)
     elif data_type == "state": 
         node["last_state"] = payload
 
