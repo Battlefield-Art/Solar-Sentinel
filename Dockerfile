@@ -17,7 +17,7 @@ RUN curl -fsSL https://dl.grafana.com/oss/release/grafana-${GRAFANA_VERSION}.lin
 
 # InfluxDB 2.7.4
 ARG INFLUXDB_VERSION=2.7.4
-ARG INFLUXDB_SHA256=9343715d012497672807f43350257367f607c3970b55ed9969299ed301556948
+ARG INFLUXDB_SHA256=2a2ccca52e42fb483c93ac3672cb264ffb804fc0be33209e5d954dd755146288
 RUN curl -fsSL https://dl.influxdata.com/influxdb/releases/influxdb2-${INFLUXDB_VERSION}_linux_amd64.tar.gz -o influxdb.tar.gz \
     && /usr/local/bin/validate-sha256.sh influxdb.tar.gz ${INFLUXDB_SHA256}
 
