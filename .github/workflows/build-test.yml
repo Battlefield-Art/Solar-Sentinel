@@ -1,0 +1,79 @@
+name: Build & Smoke Test
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'cto/**'
+
+jobs:
+  build-and-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          df -h
+
+      - name: Build main image
+        run: |
+          docker build -t solar-sentinel-aio:v3 .
+        timeout-minutes: 120
+
+      - name: Run container (smoke test)
+        timeout-minutes: 15
+        env:
+          MQTT_PASS: "ci-test-pass-123"
+        run: |
+          docker run -d --name solar-sentinel \
+            -e MQTT_USER=solar -e MQTT_PASS="$MQTT_PASS" \
+            -e GF_SECURITY_ADMIN_PASSWORD="ci-grafana-pass" \
+            -e GEMINI_API_KEY="" \
+            -e INFLUXDB_ORG=my-org \
+            solar-sentinel-aio:v3
+          sleep 90
+          echo "=== supervisor status ==="
+          docker exec solar-sentinel supervisorctl status || true
+          echo "=== influx bootstrap ==="
+          docker exec solar-sentinel sh -lc 'ls -la /data/influxdb/ 2>/dev/null; echo "token:"; cat /data/influxdb/influx.env 2>/dev/null | head -3'
+          echo "=== guard log tail ==="
+          docker exec solar-sentinel sh -lc 'tail -n 30 /data/logs/guard.log 2>/dev/null || echo "no guard log yet"'
+          echo "=== MQTT auth check (should fail without creds) ==="
+          docker exec solar-sentinel sh -lc 'mosquitto_pub -h localhost -t solar/ci/test -m hi 2>&1 | head -3 || true'
+          echo "=== MQTT auth check (should work with creds) ==="
+          docker exec solar-sentinel sh -lc 'mosquitto_pub -h localhost -u solar -P '"$MQTT_PASS"' -t solar/ci/test -m hi 2>&1 | head -3 || true'
+          echo "=== buckets ==="
+          docker exec solar-sentinel sh -lc 'INFLUXDB_TOKEN=$(grep INFLUXDB_TOKEN /data/influxdb/influx.env | cut -d= -f2); influx bucket list --token "$INFLUXDB_TOKEN" --org my-org --host http://localhost:8086 2>&1 | head -10'
+
+      - name: Health check
+        timeout-minutes: 10
+        run: |
+          for i in $(seq 1 30); do
+            if docker inspect --format='{{.State.Health.Status}}' solar-sentinel 2>/dev/null | grep -q healthy; then
+              echo "CONTAINER HEALTHY after ~$((i*20))s"
+              break
+            fi
+            sleep 20
+          done
+          docker inspect --format='{{.State.Health.Status}}' solar-sentinel
+
+      - name: Collect logs (always)
+        if: always()
+        run: |
+          docker logs solar-sentinel 2>&1 | tail -n 100 > container.log || true
+          docker exec solar-sentinel sh -lc 'cat /var/log/supervisor/*.log 2>/dev/null' > supervisor.log || true
+        continue-on-error: true
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: container-logs
+          path: |
+            container.log
+            supervisor.log
+          retention-days: 7
