@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   solar-sentinel:
     build: .
@@ -13,7 +11,17 @@ services:
       - "3001:3001"   # Uptime Kuma
     volumes:
       - ./data:/data
+    restart: unless-stopped
+    mem_limit: 6g
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
     environment:
+      TZ: "${TZ:-Asia/Dubai}"
       # Weather (self-hosted open-meteo service below, or public API fallback)
       OPEN_METEO_URL: "${OPEN_METEO_URL:-http://open-meteo:8080}"
       # MQTT Configuration (override via .env - defaults are NOT secure)
@@ -66,7 +74,6 @@ services:
 
       # Notifications
       NTFY_URL: "${NTFY_URL:-https://ntfy.sh/solar_sentinel_guard_alerts}"
-    restart: unless-stopped
 
   # Optional self-hosted weather service (Open-Meteo). Builds from upstream's
   # own Dockerfile on first run (slow, Swift toolchain). If you skip it or it

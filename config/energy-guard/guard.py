@@ -79,6 +79,7 @@ PANEL_AREA = float(os.getenv("PANEL_AREA", 20.0))
 
 NTFY_URL = os.getenv("NTFY_URL", "https://ntfy.sh/solar_sentinel_guard_alerts")
 OPEN_METEO_URL = os.getenv("OPEN_METEO_URL", "http://localhost:8080")
+ELECTRICITY_RATE_USD_PER_KWH = float(os.getenv("ELECTRICITY_RATE_USD_PER_KWH", 0.15))
 
 # SOC Thresholds
 SOC_LOCKOUT = float(os.getenv("SOC_LOCKOUT", 20.0))
@@ -206,6 +207,7 @@ MQTT_TOPICS = {
     "eva_command": "solar/eva/command",
     "eva_optimal_window": "solar/eva/optimal_window",
     "eva_device_schedule": "solar/eva/device/#",
+    "eva_waste_analysis": "solar/eva/waste_analysis",
 }
 
 mqtt_client = mqtt.Client(client_id="solar_guard")
@@ -279,6 +281,9 @@ def init_influx():
     global influx_client, write_api
     while influx_client is None:
         try:
+            health = requests.get(f"{INFLUXDB_URL}/health", timeout=5)
+            if health.status_code != 200:
+                raise Exception(f"InfluxDB health check returned {health.status_code}")
             influx_client = InfluxDBClient(url=INFLUXDB_URL, token=INFLUXDB_TOKEN, org=INFLUXDB_ORG)
             write_api = influx_client.write_api(write_options=SYNCHRONOUS)
             logger.info("Connected to InfluxDB")
@@ -757,6 +762,48 @@ def eva_publish_map():
     point.field("phantom_cuts", state["eva"]["phantom_cuts_performed"])
     safe_write(INFLUXDB_BUCKET_STATE, point)
 
+# H-6b: Waste Analysis Publisher
+def eva_publish_waste_analysis():
+    """Publish energy waste analysis to MQTT for the Node-RED dashboard"""
+    if not influx_client:
+        return
+    query_api = influx_client.query_api()
+    query = f'''
+    from(bucket: "{INFLUXDB_BUCKET_EVA_PATTERNS}")
+      |> range(start: -24h)
+      |> filter(fn: (r) => r["_measurement"] == "eva_patterns")
+      |> filter(fn: (r) => r["_field"] == "avg_w")
+      |> mean()
+    '''
+    try:
+        tables = query_api.query(query)
+        phantom_loads = []
+        total_waste_w = 0.0
+        for table in tables:
+            for record in table.records:
+                avg_w = record.get_value()
+                node_id = record.values.get("node_id", "unknown")
+                # Consider < 10W as potential phantom load
+                if avg_w < 10.0:
+                    phantom_loads.append({
+                        "node_id": node_id,
+                        "avg_watts": round(avg_w, 2),
+                        "daily_kwh": round(avg_w * 24 / 1000, 3),
+                        "monthly_cost_estimate": round(avg_w * 24 * 30 / 1000 * ELECTRICITY_RATE_USD_PER_KWH, 2)
+                    })
+                    total_waste_w += avg_w
+        payload = {
+            "phantom_loads": phantom_loads,
+            "total_phantom_watts": round(total_waste_w, 2),
+            "daily_waste_kwh": round(total_waste_w * 24 / 1000, 3),
+            "monthly_cost_estimate_usd": round(total_waste_w * 24 * 30 / 1000 * ELECTRICITY_RATE_USD_PER_KWH, 2),
+            "timestamp": datetime.now().isoformat()
+        }
+        mqtt_client.publish(MQTT_TOPICS["eva_waste_analysis"], json.dumps(payload), retain=True)
+        logger.info(f"EVA: Published waste analysis ({len(phantom_loads)} phantom loads)")
+    except Exception as e:
+        logger.error(f"Error in waste analysis publish: {e}")
+
 # H-7: Node Update Handler
 def handle_eva_node_update(node_id, data_type, payload):
     """Handle incoming EVA node updates from MQTT"""
@@ -781,6 +828,7 @@ def handle_eva_command(payload):
         "PUBLISH_MAP": eva_publish_map,
         "EVA_OPTIMIZE": eva_optimal_window_finder,
         "EVA_LEARN": eva_pattern_learning,
+        "PUBLISH_WASTE_ANALYSIS": eva_publish_waste_analysis,
         "RELEASE_SCHEDULED_DEVICES": eva_release_scheduled_devices_now,
         "RELOAD_REGISTRY": lambda: logger.info("EVA: Registry reload requested")
     }
@@ -808,6 +856,9 @@ def setup_eva_schedule():
     
     # Recommendations generation - every 6 hours
     schedule.every(6).hours.do(eva_generate_recommendations)
+
+    # Waste analysis publish - every 6 hours
+    schedule.every(6).hours.do(eva_publish_waste_analysis)
     
     # Release due scheduled devices and check window start - every minute
     schedule.every().minute.do(eva_release_due_devices)

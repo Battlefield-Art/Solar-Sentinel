@@ -19,9 +19,18 @@ jobs:
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
           df -h
 
-      - name: Build main image
-        run: |
-          docker build -t solar-sentinel-aio:v3 .
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build main image (cached)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: solar-sentinel-aio:v3
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
         timeout-minutes: 120
 
       - name: Run container (smoke test)

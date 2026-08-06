@@ -339,7 +339,19 @@
         "timeout": 0,
         "x": 340,
         "y": 80,
-        "wires": [["ui_template_eva_map", "ui_chart_priority", "ui_stat_phantom", "ui_stat_power"]]
+        "wires": [["ui_template_eva_map", "priority_chart_processor", "ui_stat_phantom", "ui_stat_power"]]
+    },
+    {
+        "id": "priority_chart_processor",
+        "type": "function",
+        "z": "flow_eva_map",
+        "name": "Priority Chart Data",
+        "func": "const p = msg.priorityCounts || {};\nmsg.payload = [\n  { label: 'Phantom', value: p.phantom || 0 },\n  { label: 'Shiftable', value: p.shiftable || 0 },\n  { label: 'Luxury', value: p.luxury || 0 },\n  { label: 'Critical', value: p.critical || 0 }\n];\nreturn msg;",
+        "outputs": "1",
+        "timeout": 0,
+        "x": 570,
+        "y": 120,
+        "wires": [["ui_chart_priority"]]
     },
     {
         "id": "ui_template_eva_map",

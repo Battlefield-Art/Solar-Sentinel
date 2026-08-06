@@ -51,6 +51,20 @@ Without these, Energy Guard runs on defaults and EVA has no node data.
 | Uptime Kuma | http://localhost:3001 |
 | MQTT | localhost:1883 |
 
+### Long-Term Hardening (appliance mode)
+- **Backups:** weekly USB backup of `/data` (rotates last 8) + daily InfluxDB
+  snapshots (30-day retention) via cron. See `data/RECOVERY.md`.
+- **Resource limits:** the container is capped at 6 GB RAM with rotating Docker
+  logs (20 MB × 5) so a runaway service can't fill the disk.
+- **Privilege reduction:** `no-new-privileges:true`; services run as the non-root
+  `solar` user; MQTT requires credentials; Grafana/InfluxDB tokens are not in the
+  repo.
+- **Self-healing:** supervisord restarts any crashed service; the Docker
+  healthcheck flags the container if a service dies; `healthcheck.sh` auto-restarts
+  non-running services and alerts via ntfy.
+- **CI:** a GitHub Actions workflow builds the image and smoke-tests boot,
+  InfluxDB onboarding, and MQTT auth on every push — so nothing regresses.
+
 ## Phase 3: USB Backup + 20-Year Hardening
 This version includes comprehensive system hardening and a robust USB-based backup and recovery strategy designed for long-term reliability.
 
